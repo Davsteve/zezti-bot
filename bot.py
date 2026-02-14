@@ -1,6 +1,7 @@
 import os
 import random
 import asyncio
+import json
 import discord
 from discord.ext import commands
 from dotenv import load_dotenv
@@ -23,6 +24,21 @@ else:
     USE_AI = True
     client = Groq(api_key=GROQ_KEY)
 
+# ================= MEMORY SYSTEM =================
+
+MEMORY_FILE = "memory.json"
+
+def load_memory():
+    if not os.path.exists(MEMORY_FILE):
+        return {}
+    with open(MEMORY_FILE, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+def save_memory(data):
+    with open(MEMORY_FILE, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2)
+
+memory = load_memory()
 
 # ================= BOT SETUP =================
 
@@ -33,11 +49,8 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 
 # ================= STATE =================
 
-# user_id -> last bot message id
 active_chats = {}
-
 WAKE_WORD = "zezti"
-
 
 # ================= PERSONALITY =================
 
@@ -48,7 +61,6 @@ FALLBACK = [
     "Lowkey facts.",
     "Try again, I blinked 😭"
 ]
-
 
 SYSTEM_PROMPT = """
 You are Zezti.
@@ -74,17 +86,15 @@ Style:
 Short replies. Natural. Fun. Humorous. Engaging. Creative. Well thought. Witty. 
 """
 
-
 MODELS = [
     "llama-3.3-70b-versatile",
     "llama-3.1-8b-instant",
     "llama-3.2-3b-preview"
 ]
 
-
 # ================= AI =================
 
-async def get_ai(text):
+async def get_ai(history_text):
 
     if not USE_AI:
         return None
@@ -95,10 +105,10 @@ async def get_ai(text):
                 model=model,
                 messages=[
                     {"role": "system", "content": SYSTEM_PROMPT},
-                    {"role": "user", "content": text}
+                    {"role": "user", "content": history_text}
                 ],
                 temperature=0.8,
-                max_tokens=120
+                max_tokens=150
             )
 
             return resp.choices[0].message.content.strip()
@@ -109,13 +119,11 @@ async def get_ai(text):
 
     return None
 
-
 # ================= EVENTS =================
 
 @bot.event
 async def on_ready():
     print(f"🔥 Zezti online as {bot.user}")
-
 
 @bot.event
 async def on_message(message):
@@ -124,7 +132,7 @@ async def on_message(message):
         return
 
     text = message.content.lower().strip()
-    user = message.author.id
+    user_id = str(message.author.id)
     channel = message.channel
 
     reply_to_bot = (
@@ -135,48 +143,80 @@ async def on_message(message):
 
     # ================= WAKE =================
 
-    if WAKE_WORD in text and user not in active_chats:
+    if WAKE_WORD in text and user_id not in active_chats:
 
         msg = await channel.send("I'm awake. Don't waste it 😏")
-        active_chats[user] = msg.id
+        active_chats[user_id] = msg.id
         return
-
 
     # ================= SLEEP =================
 
-    if user in active_chats and not reply_to_bot:
-
-        del active_chats[user]
+    if user_id in active_chats and not reply_to_bot:
+        del active_chats[user_id]
         await channel.send("Zezti offline 😴 Ping me again.")
         return
 
-
-    # ================= CONTINUE =================
-
-    if user not in active_chats:
+    if user_id not in active_chats:
         return
 
+    # ================= MEMORY INIT =================
 
-    # ================= AI FIRST =================
+    if user_id not in memory:
+        memory[user_id] = []
 
-    prompt = f"User: {message.content}\nZezti:"
+    # Save user message
+    memory[user_id].append({
+        "role": "user",
+        "text": message.content
+    })
+
+    # Keep only last 20 messages
+    memory[user_id] = memory[user_id][-20:]
+    save_memory(memory)
+
+    # ================= BUILD HISTORY =================
+
+    history = ""
+
+    for msg in memory[user_id]:
+        if msg["role"] == "user":
+            history += f"User: {msg['text']}\n"
+        else:
+            history += f"Zezti: {msg['text']}\n"
+
+    prompt = f"""
+Conversation so far:
+{history}
+
+User: {message.content}
+Zezti:
+"""
+
+    # ================= AI =================
 
     ai_reply = await get_ai(prompt)
 
     if ai_reply:
 
         sent = await channel.send(ai_reply)
-        active_chats[user] = sent.id
-        return
 
+        # Save bot reply
+        memory[user_id].append({
+            "role": "bot",
+            "text": ai_reply
+        })
+
+        memory[user_id] = memory[user_id][-20:]
+        save_memory(memory)
+
+        active_chats[user_id] = sent.id
+        return
 
     # ================= FALLBACK =================
 
     reply = random.choice(FALLBACK)
-
     sent = await channel.send(reply)
-    active_chats[user] = sent.id
-
+    active_chats[user_id] = sent.id
 
 # ================= COMMANDS =================
 
@@ -184,6 +224,15 @@ async def on_message(message):
 async def ping(ctx):
     await ctx.send("Still alive 😎")
 
+@bot.command()
+async def forget(ctx):
+    user_id = str(ctx.author.id)
+
+    if user_id in memory:
+        del memory[user_id]
+        save_memory(memory)
+
+    await ctx.send("Memory wiped 🧠✨")
 
 # ================= RUN =================
 
